@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: secure-ship
+spec:
+  # maxUnavailable (not minAvailable: 1) so a single-replica dev deployment
+  # does not block node drains.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: secure-ship

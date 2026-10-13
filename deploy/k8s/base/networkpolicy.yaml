@@ -1,0 +1,30 @@
+# Default deny: no pod in the namespace may send or receive traffic unless
+# another policy allows it. The service makes no outbound calls (not even
+# DNS), so egress stays fully denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Allow HTTP to the app port only from the ingress controller's namespace.
+# Adjust the namespace label to match your ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: secure-ship
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080

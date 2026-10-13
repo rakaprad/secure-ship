@@ -1,0 +1,27 @@
+# golangci-lint v2 configuration. https://golangci-lint.run/docs/configuration/
+version: "2"
+
+linters:
+  # "standard" = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - gosec        # security-focused static analysis (SAST)
+    - bodyclose    # unclosed HTTP response bodies leak connections
+    - noctx        # HTTP requests without a context cannot be cancelled
+    - errorlint    # wrapped-error comparisons that skip errors.Is/As
+    - misspell
+  settings:
+    gosec:
+      # Report every rule at every severity; tune with excludes if needed.
+      severity: low
+      confidence: low
+  exclusions:
+    rules:
+      # Test helpers legitimately ignore some errors and use fixed inputs.
+      - path: _test\.go
+        linters: [gosec, errcheck, noctx]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

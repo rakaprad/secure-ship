@@ -1,0 +1,11 @@
+# Accepted Trivy findings. Every entry needs a reason; review them regularly.
+
+# DS-0026: Dockerfile HEALTHCHECK. The distroless image has no shell or curl
+# to run one, and Kubernetes ignores Docker HEALTHCHECK; liveness/readiness
+# probes in deploy/k8s cover this.
+DS-0026
+
+# KSV-0125: "image from untrusted registry". Trivy's default trusted list does
+# not include ghcr.io; registry trust is enforced at admission by the Kyverno
+# verify-image-signature policy instead.
+KSV-0125

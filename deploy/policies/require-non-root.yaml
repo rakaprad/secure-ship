@@ -1,0 +1,58 @@
+# Containers must not run as root, either via the pod or container
+# securityContext. Duplicates Pod Security "restricted" on purpose so the
+# rule also holds in namespaces without PSA labels.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-run-as-non-root
+  annotations:
+    policies.kyverno.io/title: Require runAsNonRoot
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+spec:
+  background: true
+  rules:
+    - name: run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      validate:
+        failureAction: Enforce
+        message: >-
+          runAsNonRoot must be true, set either at spec.securityContext or on
+          every container's securityContext, and runAsUser must not be 0.
+        anyPattern:
+          # Option 1: set at pod level; containers may not override it to false.
+          - spec:
+              securityContext:
+                runAsNonRoot: true
+                =(runAsUser): ">0"
+              =(ephemeralContainers):
+                - =(securityContext):
+                    =(runAsNonRoot): true
+                    =(runAsUser): ">0"
+              =(initContainers):
+                - =(securityContext):
+                    =(runAsNonRoot): true
+                    =(runAsUser): ">0"
+              containers:
+                - =(securityContext):
+                    =(runAsNonRoot): true
+                    =(runAsUser): ">0"
+          # Option 2: set on every container.
+          - spec:
+              =(securityContext):
+                =(runAsUser): ">0"
+              =(ephemeralContainers):
+                - securityContext:
+                    runAsNonRoot: true
+                    =(runAsUser): ">0"
+              =(initContainers):
+                - securityContext:
+                    runAsNonRoot: true
+                    =(runAsUser): ">0"
+              containers:
+                - securityContext:
+                    runAsNonRoot: true
+                    =(runAsUser): ">0"

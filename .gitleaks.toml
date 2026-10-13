@@ -1,0 +1,12 @@
+# Gitleaks configuration: use the upstream default ruleset and add
+# project-specific allowlists only when a finding is a confirmed false positive.
+title = "secure-ship gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths that never contain real secrets"
+paths = [
+  '''go\.sum$''',
+]

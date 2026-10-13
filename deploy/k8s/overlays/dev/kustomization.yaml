@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: secure-ship-dev
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: dev
+    includeSelectors: false
+
+# CI publishes images tagged sha-<12-char commit>. Update with:
+#   kustomize edit set image ghcr.io/rakaprad/secure-ship:sha-<commit>
+images:
+  - name: ghcr.io/rakaprad/secure-ship
+    newTag: sha-000000000000
+
+patches:
+  - target:
+      kind: Deployment
+      name: secure-ship
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "https://dev.short.example.com"

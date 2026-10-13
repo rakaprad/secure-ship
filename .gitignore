@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+/server
+*.exe
+
+# Test and scan artifacts
+coverage.out
+coverage.html
+*.sarif
+sbom*.json
+
+# Local environment
+.env
+.env.*
+*.pem
+*.key
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

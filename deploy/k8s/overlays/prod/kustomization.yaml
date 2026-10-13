@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: secure-ship
+
+resources:
+  - ../../base
+  - hpa.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: prod
+    includeSelectors: false
+
+# Prod deploys an immutable digest, never a mutable tag. Replace with the
+# digest printed by the pipeline's publish job:
+#   kustomize edit set image ghcr.io/rakaprad/secure-ship@sha256:<digest>
+images:
+  - name: ghcr.io/rakaprad/secure-ship
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+patches:
+  - target:
+      kind: Deployment
+      name: secure-ship
+    patch: |-
+      # The HPA owns the replica count; a fixed value here would fight it
+      # on every apply.
+      - op: remove
+        path: /spec/replicas
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "https://short.example.com"
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: secure-ship

@@ -1,0 +1,296 @@
+# secure-ship DevSecOps pipeline
+#
+#   1. secrets-scan ─┐
+#   2. lint + sast  ─┼─> 4. build + image scan ─┐
+#   3. test + vulns ─┘                          ├─> 5. publish: push, SBOM, sign, attest (main only)
+#   6. iac scan ────────────────────────────────┘
+#
+# Action versions are pinned to a major (or exact) tag for readability.
+# Hardening step for a real deployment: pin third-party actions to full
+# commit SHAs and let Dependabot/Renovate bump them.
+
+name: pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Deny everything by default; each job requests only what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/rakaprad/secure-ship
+  # go.mod declares the minimum language version; CI always builds with the
+  # latest supported Go release so standard-library CVE fixes are picked up.
+  GO_VERSION: stable
+  GOLANGCI_LINT_VERSION: v2.14.0
+  GOVULNCHECK_VERSION: v1.8.0
+  TRIVY_VERSION: v0.70.0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  secrets-scan:
+    name: 1 · Secrets scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists PR commits to scan
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # scan the full history, not just the last commit
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  # ---------------------------------------------------------------------------
+  lint:
+    name: 2a · Lint + SAST (golangci-lint, gosec)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  codeql:
+    name: 2b · SAST (CodeQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # upload results to GitHub code scanning
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: go
+          build-mode: autobuild
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: codeql-go
+
+  # ---------------------------------------------------------------------------
+  test:
+    name: 3 · Tests (race, coverage) + govulncheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      - name: Verify module checksums
+        run: go mod verify
+      - name: Unit tests with race detector
+        run: |
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+      # govulncheck only reports CVEs in code paths the binary actually
+      # reaches, which keeps the signal-to-noise ratio high.
+      - name: Dependency and stdlib CVEs (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+
+  # ---------------------------------------------------------------------------
+  build-scan:
+    name: 4 · Build image + Trivy scan
+    needs: [secrets-scan, lint, codeql, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: meta
+        name: Compute immutable tag
+        run: echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      # Build once and save to a tarball. The publish job pushes exactly
+      # this artifact, so the image that was scanned is the image that ships.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
+          provenance: false
+      - name: Trivy image scan (SARIF report, all severities)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          input: ${{ runner.temp }}/image.tar
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "0"
+      - name: Upload image scan to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Trivy image gate (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          input: ${{ runner.temp }}/image.tar
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Keep image for publish job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  iac-scan:
+    name: 6 · IaC scan (Trivy config on k8s + Dockerfile)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Scan what will actually be applied: the rendered overlays, not the
+      # base plus patches. kubectl is preinstalled on GitHub-hosted runners.
+      - name: Render Kustomize overlays
+        run: |
+          mkdir -p rendered
+          kubectl kustomize deploy/k8s/overlays/dev  > rendered/dev.yaml
+          kubectl kustomize deploy/k8s/overlays/prod > rendered/prod.yaml
+          cp Dockerfile rendered/Dockerfile
+      - name: Trivy config scan (SARIF report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: rendered
+          format: sarif
+          output: trivy-iac.sarif
+          exit-code: "0"
+      - name: Upload IaC scan to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-iac.sarif
+          category: trivy-iac
+      - name: Trivy config gate (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: config
+          scan-ref: rendered
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 5 · Publish (push, SBOM, cosign sign + attest)
+    needs: [build-scan, iac-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # OIDC token for keyless signing (Fulcio)
+    env:
+      TAG: ${{ needs.build-scan.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: image
+          path: ${{ runner.temp }}
+      - name: Load scanned image
+        run: docker load --input "${{ runner.temp }}/image.tar"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        name: Push and resolve digest
+        run: |
+          docker push "${IMAGE}:${TAG}"
+          ref="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${TAG}")"
+          echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+      - name: Generate SBOM (Syft, SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - uses: sigstore/cosign-installer@v4.1.2
+      # Keyless signing: cosign exchanges the job's OIDC token for a
+      # short-lived Fulcio certificate bound to this workflow and ref, and
+      # records the signature in the public Rekor transparency log. There is
+      # no private key to store, rotate or leak.
+      #
+      # --new-bundle-format=false / --use-signing-config=false keep the
+      # classic signature layout, which Kyverno ClusterPolicy verifyImages
+      # reads reliably on registries without the OCI 1.1 referrers API.
+      - name: Sign image (cosign keyless)
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes --new-bundle-format=false --use-signing-config=false "$REF"
+      - name: Attest SBOM (cosign keyless)
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+        run: |
+          cosign attest --yes --new-bundle-format=false --use-signing-config=false \
+            --type spdxjson --predicate sbom.spdx.json "$REF"
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Published"
+            echo "- Image: \`${IMAGE}:${TAG}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo
+            echo "Verify:"
+            echo '```sh'
+            echo "cosign verify ${IMAGE}@${DIGEST} \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/pipeline.yml@refs/heads/main \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

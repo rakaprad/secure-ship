@@ -1,0 +1,45 @@
+# A mutable tag such as :latest makes it impossible to know (or roll back to)
+# exactly what is running. Require an explicit tag or digest.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow latest tag
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    - name: require-image-tag-or-digest
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      validate:
+        failureAction: Enforce
+        message: "Images must specify a tag or digest."
+        foreach:
+          - list: "request.object.spec.[containers, initContainers, ephemeralContainers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ contains(element.image, ':') || contains(element.image, '@') }}"
+                    operator: Equals
+                    value: false
+    - name: disallow-latest
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      validate:
+        failureAction: Enforce
+        message: "The ':latest' tag is not allowed; pin a version or digest."
+        foreach:
+          - list: "request.object.spec.[containers, initContainers, ephemeralContainers][]"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.image }}"
+                    operator: Equals
+                    value: "*:latest"

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-ship
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: secure-ship
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

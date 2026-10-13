@@ -1,0 +1,9 @@
+# Only the Go sources are needed in the build context. Keeping everything
+# else out makes builds faster and stops secrets (.env, keys) or the .git
+# history from ever reaching an image layer.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+**/*_test.go

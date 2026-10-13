@@ -1,0 +1,34 @@
+# Fast checks that run on every `git commit`. Install once with:
+#   pipx install pre-commit && pre-commit install
+# The same checks (and slower ones) run again in CI, so skipping them
+# locally cannot bypass them.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks # block commits that contain secrets
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: bash -c 'out=$(gofmt -l "$@"); if [ -n "$out" ]; then echo "needs gofmt:"; echo "$out"; exit 1; fi' --
+        language: system
+        types: [go]
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false

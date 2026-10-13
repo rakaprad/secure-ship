@@ -1,0 +1,38 @@
+# Only admit ghcr.io/rakaprad/* images that were signed keylessly by this
+# repository's pipeline on the main branch. A stolen registry token alone is
+# not enough to deploy: the attacker would also need to run code in this
+# repo's main-branch workflow to obtain a matching Fulcio certificate.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+  annotations:
+    policies.kyverno.io/title: Verify cosign keyless signature
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: high
+spec:
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: verify-ghcr-rakaprad
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/rakaprad/*"
+          failureAction: Enforce
+          # Resolve tags to digests and rewrite the pod spec to the verified
+          # digest, so the image that runs is the image that was checked.
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    # Fulcio certificate SAN = the workflow file and ref that signed.
+                    subject: "https://github.com/rakaprad/secure-ship/.github/workflows/pipeline.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
